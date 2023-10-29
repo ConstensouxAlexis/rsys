@@ -1,0 +1,134 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+
+fpath_data <- "C:/Users/alexi/OneDrive/Bureau/rsys_project/data/log2TPM_tumor_example.Rds"
+data <- readRDS(fpath_data)
+```
+
+Step 1: pre-filtering the dataset by selecting relevant cells
+
+```{r}
+library(Seurat)
+rna_df <- CreateSeuratObject(counts=data)
+rna_df <- NormalizeData(rna_df)
+
+```
+```{r}
+# Visualize QC metrics as a violin plot
+# This is done to identify outlayer cells and remove them
+rna_df[["percent.mt"]] <- PercentageFeatureSet(rna_df, pattern = "^MT-")
+VlnPlot(rna_df, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+```{r}
+plot1 <- FeatureScatter(rna_df, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(rna_df, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+
+We'll only select cells that have feature count over 6000 or mitochondrial count > 3%
+
+```{r}
+rna_df <- subset(rna_df, subset = nFeature_RNA < 6000 & percent.mt < 3)
+```
+
+
+Now that we have filtered some cells, we'll filter genes, using the same filter than in the article:
+mean between 0.0125 and 3, and variance standardized greater than 5
+
+```{r}
+variables_features <- FindVariableFeatures(rna_df, selection.method = "vst")
+variables_features <- HVFInfo(object = variables_features, assay = "RNA")
+selected_features <- subset(variables_features, subset = mean < 3 & mean > 0.0125 & variance.standardized > 0.5)
+processed_rna_df <- rna_df[row.names(rna_df) %in% row.names(selected_features), ]
+processed_rna_df
+```
+
+
+We notice that it reduced the number of genes from 18500 to 12000, but the number of genes remain too important 
+
+
+```{r}
+variables_features <- FindVariableFeatures(rna_df, selection.method = "vst")
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(variables_features), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(variables_features)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+
+Step 2 : feature clustering to identifying differentially expressed genes (DEGs)
+
+To identify DEGs, we need first to determine cell clusters in our dataset. Once we have clusters, we determine, by comparing cell expressions between clusters, which cells are differentially expressed.
+
+In the paper, researchers take into account cell origin (lung, brain ...) to create those clusters. Since we do not hace access to that data, we'll only use statistical tools to create clusters (PCA and then K means)
+
+```{r}
+# Data has already been scaled, but Seurat PCA function needs a scaled object
+all_genes <- rownames(variables_features)
+variables_features <- ScaleData(variables_features, features = all_genes)
+pca_rna <- RunPCA(variables_features, features = VariableFeatures(object = variables_features))
+```
+
+```{r}
+VizDimLoadings(pca_rna, dims = 1:2, reduction = "pca")
+```
+```{r}
+DimPlot(pca_rna, reduction = "pca")
+```
+Now that we have the PCA of our dataset, we have to chose how many PCs to keep (ie. determine the dimension of the dataset)
+We'll use the JackStraw method like in the article
+
+
+```{r}
+jackstraw <- JackStraw(pca_rna, num.replicate = 100)
+jackstraw_score <- ScoreJackStraw(jackstraw, dims = 1:20)
+JackStrawPlot(jackstraw_score, dims = 1:15)
+```
+This looks like we have a high-dimensional dataset, since the 15 first PC are clearly above the uniform distribution line.
+
+```{r}
+ElbowPlot(jackstraw_score)
+```
+Here we see again that all 15 (even 20) first PC account for information. We'll only keep the first 10 dimensions, since there is a little drop off after PC 10.
+
+We now cluster the dataset with k means.
+
+
+```{r}
+neighbors <- FindNeighbors(jackstraw_score, dims = 1:10)
+clusters <- FindClusters(neighbors, resolution = 0.5)
+# If you haven't installed UMAP, you can do so via reticulate::py_install(packages = 'umap-learn')
+umap <- RunUMAP(clusters, dims = 1:10)
+```
+
+
+```{r}
+DimPlot(umap, reduction = "umap")
+```
+Now, we use Seurat FindAllMarkers to identify DEGs, between the clusters we determined with k means. We use the same statistical tests and thresholds than in the articles
+
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+umap.markers <- FindAllMarkers(umap, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25, test.use = "t")
+```
+We only keep genes with log2FC value greater than 1 and p_val lesser than 1%. We end up with 2063 genes. If we want to have less genes, we can always add more constraints, or keep the n genes with higher log2FC
+
+```{r}
+umap.markers[umap.markers$avg_log2FC > 1 & umap.markers$p_val < 0.01, ]
+```
+
+
+
+
+
+
