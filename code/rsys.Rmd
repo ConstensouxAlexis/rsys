@@ -6,7 +6,11 @@ output: html_notebook
 ```{r}
 
 fpath_data <- "C:/Users/alexi/OneDrive/Bureau/rsys_project/data/log2TPM_tumor_example.Rds"
+fpath_info <- "C:/Users/alexi/OneDrive/Bureau/rsys_project/data/cell_info_tumor_example.Rds"
 data <- readRDS(fpath_data)
+info_data <- readRDS(fpath_info)
+print(data)
+
 ```
 
 Step 1: pre-filtering the dataset by selecting relevant cells
@@ -53,7 +57,7 @@ We notice that it reduced the number of genes from 18500 to 12000, but the numbe
 
 
 ```{r}
-variables_features <- FindVariableFeatures(rna_df, selection.method = "vst")
+variables_features <- FindVariableFeatures(rna_df, selection.method = "vst", nfeatures=2000)
 
 # Identify the 10 most highly variable genes
 top10 <- head(VariableFeatures(variables_features), 10)
@@ -107,12 +111,12 @@ We now cluster the dataset with k means.
 neighbors <- FindNeighbors(jackstraw_score, dims = 1:10)
 clusters <- FindClusters(neighbors, resolution = 0.5)
 # If you haven't installed UMAP, you can do so via reticulate::py_install(packages = 'umap-learn')
-umap <- RunUMAP(clusters, dims = 1:10)
+umap <- RunTSNE(clusters, dims = 1:10)
 ```
 
 
 ```{r}
-DimPlot(umap, reduction = "umap")
+DimPlot(umap, reduction = "tsne")
 ```
 Now, we use Seurat FindAllMarkers to identify DEGs, between the clusters we determined with k means. We use the same statistical tests and thresholds than in the articles
 
@@ -121,14 +125,69 @@ Now, we use Seurat FindAllMarkers to identify DEGs, between the clusters we dete
 # ones
 umap.markers <- FindAllMarkers(umap, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25, test.use = "t")
 ```
-We only keep genes with log2FC value greater than 1 and p_val lesser than 1%. We end up with 2063 genes. If we want to have less genes, we can always add more constraints, or keep the n genes with higher log2FC
+We only keep genes with log2FC value greater than 1 and p_val lesser than 1%. We end up with 2063 genes
 
 ```{r}
-umap.markers[umap.markers$avg_log2FC > 1 & umap.markers$p_val < 0.01, ]
+markers <- umap.markers[umap.markers$avg_log2FC > 1 & umap.markers$p_val < 0.01, ]
+print(markers)
+```
+
+Finally, we will compare the expression of these selected genes with their expression in the normal case. To do so, we'll use the student t test to asses wether the gene distribution is different or not.
+
+
+```{r}
+
+fpath_data_normal <- "C:/Users/alexi/OneDrive/Bureau/rsys_project/data/log2TPM_normal_example.Rds"
+data_normal <- data.frame(readRDS(fpath_data_normal))
+normal_markers <- data.frame(t(data_normal[markers$gene, ]))
+tumor_markers <- data.frame(t(data[markers$gene, ]))
 ```
 
 
+```{r}
 
+# Create an empty dataframe to store the t-test results
+t_test_results <- data.frame()
 
+# Loop over columns
+for (colname in colnames(normal_markers)) {
+  # Perform the paired t-test for the corresponding columns
+  normal_genes = normal_markers[[colname]]
+  tumor_genes = tumor_markers[[colname]]
+  t_test_result <- t.test(tumor_genes, normal_genes, paired = TRUE)
+  
+  # Extract and store relevant information in the results dataframe
+  result_row <- data.frame(
+    Gene = colname,
+    mean_diff = t_test_result$estimate,
+    pval = t_test_result$p.value,
+    log10pval = -log10(t_test_result$p.value)
+  )
+  
+  t_test_results <- rbind(t_test_results, result_row)
+}
 
+# Print the t-test results
+print(t_test_results)
 
+```
+```{r}
+library(ggplot2)
+ggplot(t_test_results, aes(x=mean_diff, y=log10pval)) + geom_point()
+```
+
+```{r}
+selected_genes <- t_test_results[abs(t_test_results$mean_diff) > 0.7, ]$Gene
+data_network <- data.frame(tumor_markers[, selected_genes])
+graph <- get_grn(data_network, method=c("aracne"), type = "gene")
+```
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
